@@ -1,0 +1,760 @@
+---
+title: "BT Finance Project"
+author: 
+- Sean Teo Pang Boon (A0235269X)\newline
+- Gan Ming Hui (A0233024X)\newline
+- Ng Rui Yan Rena (A0238317A)\newline
+- Lim Shi Ern Grace (A0244227J)\newline
+- Tan Shu Xian Vina (A0240751M)\newline
+output:
+  beamer_presentation: 
+    theme: "CambridgeUS"
+    colortheme: "dolphin"
+    fonttheme: "structurebold"
+date: "Group 17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE) 
+
+library(dplyr)
+library(knitr)
+library(tidyverse)
+library(readxl) 
+#library(XLConnect)
+options(java.parameters = "-Xmx2048m")
+library(plotly) 
+library(ggplot2)
+library(corrplot)
+library(kableExtra)
+library(flextable)
+
+library(quantmod)
+library(xts)
+library(timetk) 
+library(timeSeries)
+
+library(PerformanceAnalytics)
+library(PortfolioAnalytics)
+library(fPortfolio)
+
+library("lubridate")
+options(scipen = 999)
+```
+
+## Content Page
+1. Selected ETFs
+2. Assumptions & Data Manipulation
+3. Efficient Frontier
+4. Portfolios (Low, Medium & High Risk)
+5. Portfolio Analysis
+6. Summary of Portfolio Performance
+7. Appendix 1: CAPM Regression
+8. Appendix 2: Covariance matrix
+
+``` {r readData}
+
+# Obtain relevant info from the respective sheets
+returnsSheet <- read_excel("ETFfxReturns.xlsx", sheet = "Returns", col_names = TRUE)
+staticSheet <- read_excel("ETFfxReturns.xlsx", sheet = "Static", col_names = TRUE)
+fxSheet <- read_excel("ETFfxReturns.xlsx", sheet = "FX", col_names = TRUE)
+
+# Adding new asset class col
+staticSheet$Asset.Class.Names <- 
+  c("Bonds","Bonds","Bonds","Bonds","Bonds","Equity","Equity","Equity","Equity","Equity","Equity","Alternatives","Alternatives","Alternatives","Alternatives","Alternatives")
+
+# Renaming the cols
+returnsSheet <- returnsSheet %>% 
+  rename_with(~str_remove(., '.US.Equity')) %>%
+  rename_with(~str_remove(., '.JT.Equity'))
+
+# returnsSheet <- returnsSheet %>% mutate(mkt = mkt - rf)
+```
+
+## 1.1 Characteristics of Selected ETFs
+**Developed Market (DM)** exchange-traded funds (ETFs) focus on holdings within the world's most advanced economies. In contrast, **Emerging Market(EM)** ETFs focus on holdings in economies that are currently developing from a closed economy to a market economy. The table below shows the markets and Asset Classes that make up each individual ETF in our portfolio.
+```{r ETF Assets, echo = FALSE}
+
+overview <- data.frame(Bonds = c("AGG, SCHP, VCSH, BNDX","VWOB"),
+                       Equities = c("1306, VOO, VO, VSS, VGK", "VWO"),
+                       `Alternatives (Real Estate)` = c("1343, VNQ, VNQI", "VNQI"),
+                       `Alternatives (Commodities)` = c("IAU, BCI", "IAU, BCI"))
+
+
+rownames(overview) <- c("DM","EM")
+overview <- overview %>% 
+  rename(`Alternatives (Real Estate)` = Alternatives..Real.Estate.,
+         `Alternatives (Commodities)` = Alternatives..Commodities.)
+kable(overview) %>% 
+  kableExtra::kable_styling(font_size = 5.5, bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+
+
+```
+The selection of ETFs serve to capture a range of asset classes across both EMs & DMs.  
+
+```{r dataManipulation}
+# Convert all non-jap ETFs that are not measured in Yen to Yen
+convertedReturns = returnsSheet
+
+# Filter out foreign ETFs (names) using info from static sheet, filtering out ones that does not have JPY as currency
+foreignETFNames = dplyr::filter(staticSheet, staticSheet$CCY != 'JPY')$ETF
+
+# As the naming is different in both sheets, obtain the cols from the returnsSheet that contain these foreign ETFs
+ETFNames = colnames(select(returnsSheet, starts_with(foreignETFNames)))
+
+# Upon inspection, all these ETFs are in USD, thus we only need the USD-JPY exchange rate
+fxRate = fxSheet$USDJPY.Curncy
+
+for (ETF in ETFNames) {
+  convertedReturns[ETF] = (1 + convertedReturns[ETF]) * (1 + fxRate) - 1
+}
+
+convertedReturnsMkt = convertedReturns[c(1, 2, 4:length(convertedReturns))]
+convertedReturnsOri = convertedReturns
+convertedReturns = convertedReturns[c(1, 4:length(convertedReturns))] # Drop rf, mkt
+ETFnames <- staticSheet$ETF
+```
+
+## 1.2 Justification for ETF characteristics
+
+The following statistics were computed and compared among ETFs to select for our portfolio. 
+
+```{r justification of chracteristics, echo = FALSE}
+
+text_tbl <- data.frame(
+  Characteristic = c("Asset Class", "Benchmark", "Currency", "Trading Fees","Bid-Ask Spread", "20-Y Mean Excess Returns (MER)", "Tracking Difference", "Expense Ratio"),
+  Justification = c("Breakdown of asset classes is the diversification of portfolios.", "Benchmarks allow investors to assess the relative success of their portfolios.", "Converting all the rates to the same rate when comparing returns is to ensure consistency by providing the same benchmark for all ETFs. ", "Being well informed about trading fees is important as excessive fees may eat into your profits.", "Bid-Ask Spread indicates the liquidity of ETFs in the portfolio.", "Investors can use excess returns to assess their investment performance in contrast to other investment options.", "Tracking difference informs investors about the relative performance of an ETF in comparison to its benchmark index.", "The expense ratio informs an investor of both their costs when investing in a specific fund, and the amount that their returns will be reduced by. The expense ratio of an ETF can have a big impact on investment performance over time.")
+)
+
+flextable::flextable(text_tbl, cwidth = c(0.5,8), cheight= c(0.11,0.11))
+```
+
+## 1.3 Characteristics of Selected ETFs
+
+The table below summarises the characteristics of the selected ETFs as listed earlier.
+```{r ETF Overview, echo = FALSE, fig.align='center'}
+
+MeanAnnReturns <- (((colMeans(convertedReturns[,-1]) - mean(returnsSheet$rf) + 1)^252) - 1) 
+MeanReturns <- colMeans(convertedReturns[,-1]) - mean(returnsSheet$rf)
+ExcessReturns <- convertedReturns[,-1] - mean(returnsSheet$rf)
+GeoMeanReturns <- apply(ExcessReturns, 2,function(x) exp(mean(log(x))))
+
+TrackingError <- c("-0.01", "-0.07","0","-0.03","0.40","NA","-0.04","-0.02","0.02","0.11","-0.17","NA","-0.12","0.36","-0.25","NA")
+ExpenseRatio <- c("0.03","0.04","0.07","0.07","0.20","0.05","0.04","0.05","0.07","0.08","0.14","0.12","0.12","0.12","0.25","0.25")
+
+overview <- staticSheet %>% 
+  select(`Asset Class`, Benchmark, CCY, Fees, `B/A Spread`) 
+overview <- cbind(overview,MeanReturns)
+overview <- cbind(overview,TrackingError)
+overview <- cbind(overview,ExpenseRatio)
+overview <- overview %>% 
+  rename(`Bid-Ask Spread` = `B/A Spread`, 
+         `20-Y MER` = MeanReturns,
+         `Tracking Difference (%)` = TrackingError,
+         `Expense Ratio (%)` = ExpenseRatio
+         )
+kable(overview) %>% kableExtra::kable_styling(font_size = 4.5)
+  
+```
+
+
+## 2 Assumptions & Data Manipulation
+\small
+**1. Conversion of Currency to JPY**
+
+Returns of ETFs priced in USD were adjusted to account for currency fluctuations between USD/JPY. Hence, the following formula was used to calculate the excess returns: $(1 + Daily Return) * (1 + fxRate) - 1$
+
+**2. Risk Free Rate**
+
+The risk free rate used in our portfolio weight optimisation was taken to be the arithmetic mean returns of the JY0003M Index which tracks the 3-Month Yen LIBOR.
+
+**3. Segmentation of portfolio inputs**
+
+To conduct forward predictions for out-of-sample data of 3 years, we optimised our portfolio weights using the daily returns of each ETF from *1 OCT 2001 to 31 DEC 2018*.  Following which, we will evaluate the predicted performance of our ETFs from *1 JAN 2019 to 18 MAR 2022* against the actual returns.
+
+\small
+
+## 3 Efficient Frontier
+
+Using the `fPortfolio` package, the efficient frontier was plotted.
+
+* The red dot represents the GMVP.
+* The green dot represents the maximum sharpe ratio portfolio. 
+
+``` {r efficientFrontier, out.height="65%", fig.align="center"}
+# Data manipulation
+Spec <- portfolioSpec()
+returnsTS <- as.timeSeries(convertedReturns)
+
+# Frontier Plot
+frontier <- portfolioFrontier(returnsTS, Spec)
+
+# Obtain risk free from using the mean of the rf col
+riskFreeRate <- mean(returnsSheet$rf)
+Spec.rf <- Spec
+setRiskFreeRate(Spec.rf) <- riskFreeRate
+
+######################## Plotting pretty frontier ######################## 
+graph <- portfolioFrontier(returnsTS, Spec.rf)
+frontierPlot(graph,  
+             col = c("black", "grey"), 
+             xlim = c(0.005, 0.014), 
+             ylim = c(0.0001, 0.0007),
+             pch = 19)
+tangencyLines(graph, col = "blue")
+tangencyPoints(graph, col = "green", pch = 19, cex = 1.5)
+minvariancePoints(graph, col = "red", pch = 19, cex = 1.5)
+
+########################  ########################  ######################## 
+
+# tailoredFrontierPlot(graph)
+
+Constr1 <- c(
+  'maxsumW[1:5] = 0.60',
+  'maxsumW[12:16] = 0.145'
+     )
+
+Constr2 <- c(
+  'maxsumW[1:5] = 0.40',
+  'maxsumW[12:16] = 0.13333'
+     )
+
+Constr3 <- c(
+  'maxsumW[1:5] = 0.476',
+  'maxsumW[12:16] = 0.145'
+     )
+```
+
+## 4 Portfolio Construction
+
+**Asset class allocation**
+
+In the process of optimizing the portfolios, constraints were placed on the weightage of different asset classes to avoid uneven allocation. The constraints were curated for each portfolio with respect to the risk levels of different asset classes.
+
+::: columns
+
+:::: column
+
+**Max allocation in Alternatives:**
+
+- All portfolios: 15%
+
+
+
+**Max allocation in Bonds:**
+
+- Low risk: 60%
+
+- Medium risk: 50%
+
+- High risk: 40%
+::::
+
+:::: column
+**Max allocation in Equities:**
+
+- Low risk: 40%
+
+- Medium risk: 50%
+
+- High risk: 60%
+::::
+
+:::
+
+## 4.1.1 Low Risk Portfolio (GMVP) - Weights Distribution
+\small
+
+The Global Minimum Variance Portfolio (GMVP) provides a portfolio with minimum risk. This portfolio is catered to investors who are more risk averse and are willing to take lesser risk.
+
+``` {r GMVP, out.height="70%", fig.align="center"}
+GMVP <- minvariancePortfolio(returnsTS, Spec.rf, constraints = Constr1)
+
+GMVPweights <- getPortfolio(GMVP)$weights*100
+GMVPweights.df <- data.frame(GMVPweights)
+GMVPweights.df <- cbind(GMVPweights.df,staticSheet$Asset.Class.Names) %>% 
+  rename(`Asset.Class.Names` = `staticSheet$Asset.Class.Names`)
+GMVPweights.df <- GMVPweights.df %>% 
+  dplyr::filter(GMVPweights > 0)
+
+pct <- round(GMVPweights.df$GMVPweights, 2)
+lbls <- paste(rownames(GMVPweights.df), pct)
+lbls <- paste(lbls,"%",sep="")
+
+cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+#col=rainbow(length(lbls))
+pie(GMVPweights.df$GMVPweights, 
+    labels = lbls, 
+    col = cbp1,
+    main = "Low Risk Portfolio Weight Distribution",
+    radius = 1,
+    cex = 1)
+
+```
+
+## 4.1.2 Low Risk Portfolio - Breakdown
+
+::: columns
+
+:::: column
+*Asset Class Allocation*
+```{r GMVP_Characteristics}
+#Asset Class Allocation
+GMVPAllocation = aggregate(GMVPweights.df$GMVPweights, by=list(`Asset Class`= GMVPweights.df$Asset.Class.Names), FUN=sum)
+pct <- round(GMVPAllocation$x/sum(GMVPAllocation$x)*100,2)
+lbls <- paste(GMVPAllocation$`Asset Class`, pct)
+lbls <- paste(lbls,"%",sep="")
+
+new_green = rgb(0, 0.5, 0, alpha = 0.5)
+new_red = rgb( 0.7, 0, 0, alpha = 0.5)
+new_blue = rgb(0.3,0.6, 1, alpha = 0.5)
+#col=rainbow(length(lbls))
+par(mar=c(1,0,1,1))
+pie(GMVPAllocation$x,labels = lbls, col=c(new_red,new_green,new_blue),radius=1.05, cex = 1.2)
+```
+::::
+
+:::: column
+*Geographic Distribution*
+```{r GMVP_Geog}
+country <- c("US", "Japan", "UK", "Canada", "France", "Germany", "Others")
+lowDistr <- c(19.96, 33.66, 3.07, 3.01, 5, 4.42, 30.88)
+lowGeog <- data.frame (country, lowDistr)
+lowGeog <- lowGeog[order(-lowGeog$lowDistr),]
+row.names(lowGeog) <- NULL
+colnames(lowGeog) <- c("Country", "Distribution (%)")
+kable(lowGeog) %>% kableExtra::kable_styling(font_size = 7)
+```
+::::
+
+:::
+
+## 4.2.1 Medium Risk Portfolio (Tangency Portfolio) - Weights Distribition
+
+\small
+
+The Medium Risk Portfolio provides a portfolio with medium risk and returns. The maximum Sharpe-Ratio portfolio was chosen because it gives us the highest risk-adjusted returns. This portfolio is catered to investors who are willing to tolerate a moderate amount of risk and are able to withstand moderate changes in their investments.
+
+```{r maxReturns, fig.align='center', out.height="60%"}
+Spec.Obj.risk <- Spec.rf
+setTargetRisk(Spec.Obj.risk) <- 0.5
+maxP <- maxreturnPortfolio(returnsTS, Spec.Obj.risk, constraints = Constr3) 
+
+maxPweights <- getWeights(maxP)*100
+
+maxPweights.df <- data.frame(maxPweights)
+maxPweights.df <- cbind(maxPweights.df,staticSheet$Asset.Class.Names) %>% 
+  rename(`Asset.Class.Names` = `staticSheet$Asset.Class.Names`)
+maxPweights.df <- maxPweights.df %>% 
+  dplyr::filter(maxPweights > 0)
+
+pct <- round(maxPweights.df$maxPweights, 2)
+lbls <- paste(rownames(maxPweights.df), pct)
+lbls <- paste(lbls,"%",sep="")
+
+cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+#col=rainbow(length(lbls))
+pie(maxPweights.df$maxPweights, 
+    labels = lbls, 
+    col = cbp1,
+    main = "Medium Risk Portfolio Weight Distribution",
+    radius = 1,
+    cex = 1)
+```
+
+## 4.2.2 Medium Risk Portfolio - Breakdown
+
+::: columns
+
+:::: column
+*Asset Class Allocation*
+```{r maxReturns_Characteristics}
+#Asset Class Allocation
+maxPAllocation = aggregate(maxPweights.df$maxPweights, by=list(`Asset Class`= maxPweights.df$Asset.Class.Names), FUN=sum)
+pct <- round(maxPAllocation$x/sum(maxPAllocation$x)*100,2)
+lbls <- paste(maxPAllocation$`Asset Class`, pct)
+lbls <- paste(lbls,"%",sep="")
+par(mar=c(1,0,1,1))
+pie(maxPAllocation$x,labels = lbls, col=c(new_red,new_green,new_blue),
+   radius=1.05, cex = 1.2)
+```
+
+::::
+
+:::: column
+*Geographic Distribution*
+```{r Mid_Geog}
+country <- c("US", "Japan", "UK", "Canada", "France", "Germany", "Others")
+midDistr <- c(25.6, 36.6, 2.17,2.44, 3.98, 3.56, 25.65)
+midGeog <- data.frame (country, midDistr)
+midGeog <- lowGeog[order(-midGeog$midDistr),]
+row.names(midGeog) <- NULL
+colnames(midGeog) <- c("Country", "Distribution (%)")
+kable(midGeog) %>% kableExtra::kable_styling(font_size = 7)
+```
+
+::::
+
+:::
+
+## 4.3.1 High Risk Portfolio - Weights Distribution
+
+\small
+
+The High Risk Portfolio provides a portfolio with high returns. This portfolio is catered to investors who are more risk tolerant and are willing to tolerate a higher amount of risk and in exchange for possible higher returns. 
+
+
+```{r tangencyPortfolio, out.height="60%", fig.align="center"}
+
+tanP <- tangencyPortfolio(returnsTS, Spec.rf, constraints = Constr2)
+tanPweights <- getWeights(tanP) *100
+tanPweights.df<- data.frame(tanPweights)
+tanPweights.df <- cbind(tanPweights.df,staticSheet$Asset.Class.Names) %>% 
+  rename(`Asset.Class.Names` = `staticSheet$Asset.Class.Names`)
+tanPweights.df <- tanPweights.df %>% 
+  dplyr::filter(tanPweights > 0)
+
+pct <- round(tanPweights.df$tanPweights, 2)
+lbls <- paste(rownames(tanPweights.df), pct)
+lbls <- paste(lbls,"%",sep="")
+
+cbp1 <- c("#999999", "#E69F00", "#56B4E9", "#009E73",
+          "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+#col=rainbow(length(lbls))
+pie(tanPweights.df$tanPweights, 
+    labels = lbls, 
+    col = cbp1,
+    main = "High Risk Portfolio Weight Distribution",
+    radius = 1,
+    cex = 1)
+```
+
+## 4.3.2 High Risk Portfolio - Breakdown
+
+::: columns
+
+:::: column
+*Asset Class Allocation*
+```{r tangency_Characteristics}
+#Asset Class Allocation
+tanAllocation = aggregate(tanPweights.df$tanPweights, by=list(`Asset Class`= tanPweights.df$Asset.Class.Names), FUN=sum)
+pct <- round(tanAllocation$x/sum(tanAllocation$x)*100,2)
+lbls <- paste(tanAllocation$`Asset Class`, pct)
+lbls <- paste(lbls,"%",sep="")
+par(mar=c(1,0,1,1))
+pie(tanAllocation$x,labels = lbls, col=c(new_red,new_green,new_blue),
+   radius=1, cex = 1.2)
+
+```
+
+::::
+
+:::: column
+*Geographic Distribution*
+```{r High_Geog}
+countryHigh <- c("US", "Japan", "UK", "Canada", "Others")
+highDistr <- c(73.57, 24.27, 0.19, 0.16, 1.81)
+highGeog <- data.frame (countryHigh, highDistr)
+highGeog <- lowGeog[order(-highGeog$highDistr),]
+row.names(highGeog) <- NULL
+colnames(highGeog) <- c("Country", "Distribution (%)")
+kable(highGeog) %>% kableExtra::kable_styling(font_size = 7)
+```
+
+::::
+
+:::
+
+## 5 Back Testing
+
+
+**1. Back Testing against benchmark**
+
+Firstly, we assessed the performance of our portfolios against the market portfolio by backtesting using historical data from 1 Oct 2001 to 31 Dec 2018.
+
+The benchmark is meant to be a market portfolio which captures all assets, even non-tradable ones. To represent the market portfolio, we decided to use *mkt* as a proxy, which uses weights of 60% ACWI and 40% BGA. Hence, we will evaluate the performance of our portfolios against that of *mkt*.
+
+**2. Forward Predictions**
+
+Following that, we generated a forecast for each portfolio, based on the daily mean returns for 3 years from 1 Jan 2019 until 18 March 2022. This allows us to compare the performance of our portfolios out of sample, against the market portfolio and the actual returns of each portfolio. 
+
+
+
+## 5.1 Back Testing of Portfolio against benchmark
+Back testing was executed to examine the performance of our chosen portfolios against the market portfolio using historical data from *1 OCT 2001 to 31 DEC 2018.*
+
+```{r portfolio back testing, out.height="70%", fig.align='center'}
+convertedReturnsMktTest <- convertedReturnsMkt 
+
+maxportfolioNames <- rownames(maxPweights.df)
+convertedReturnsMktTest['Mid Risk'] <- NA
+
+for(i in 1:nrow(convertedReturnsMktTest)) {
+  sum <- 0
+  for (ETF in maxportfolioNames) {
+    sum <- sum + maxPweights.df[ETF, "maxPweights"] / 100 * convertedReturnsMktTest[i, ETF]
+  }
+  convertedReturnsMktTest[i, "Mid Risk"] = sum
+}
+
+tanportfolioNames <- rownames(tanPweights.df)
+convertedReturnsMktTest['High Risk'] <- NA
+
+for(i in 1:nrow(convertedReturnsMktTest)) {
+  sum <- 0
+  for (ETF in tanportfolioNames) {
+    sum <- sum + tanPweights.df[ETF, "tanPweights"] / 100 * convertedReturnsMktTest[i, ETF]
+  }
+  convertedReturnsMktTest[i, "High Risk"] = sum
+}
+
+lowportfolioNames <- rownames(GMVPweights.df)
+convertedReturnsMktTest['Low Risk'] <- NA
+
+for(i in 1:nrow(convertedReturnsMktTest)) {
+  sum <- 0
+  for (ETF in lowportfolioNames) {
+    sum <- sum + GMVPweights.df[ETF, "GMVPweights"] / 100 * convertedReturnsMktTest[i, ETF]
+  }
+  convertedReturnsMktTest[i, "Low Risk"] = sum
+}
+
+convertedReturnsMktTestAllTS = convertedReturnsMktTest
+convertedReturnsMktTest <- convertedReturnsMktTest %>% filter_by_time(.end_date = "2018-12")
+
+convertedReturnsMktTestTS <- as.xts(convertedReturnsMktTest[,-1], order.by = convertedReturnsMktTest$x)
+charts.PerformanceSummary(convertedReturnsMktTestTS[,c(1, 18, 19, 20)])
+
+```
+
+## 5.2.1 Forward Predictions - Low Risk Portfolio
+Forward predictions were made to examine the predicted performance of our Low Risk Portfolio against its actual returns using historical data from *1 JAN 2019 to 18 MAR 2022.*
+```{r back testing prediction, out.height="70%", fig.align='center'}
+
+convertedReturnsOri$x = as.Date(convertedReturnsOri$x)
+convertedReturnsOri$year = year(convertedReturnsOri$x)
+
+TSdata2<- xts(convertedReturnsOri[,-1], order.by = convertedReturnsOri$x)
+yearly <- apply.yearly(TSdata2, Return.cumulative)
+monthly <- apply.monthly(TSdata2, Return.cumulative)
+test <- yearly[1:18,3:18]
+testfull <-yearly[1:18,]
+actual <- yearly
+
+#calculating statistics 
+
+returns <- as.matrix(test)
+tangencyweights <- as.matrix(getWeights(tanP))
+minvarweights <- as.matrix(getPortfolio(GMVP)$weights)
+maxreturnweights <- as.matrix(getWeights(maxP))
+tangencyreturns <- returns %*% tangencyweights
+minvarreturns <- returns %*% minvarweights
+maxreturnreturns <- as.timeSeries(returns %*% maxreturnweights)
+yearlyreturns <- cumprod(testfull$mkt +1) - 1
+minvarcum <- cumprod(minvarreturns[, 1] + 1) - 1
+maxreturncum <- cumprod(maxreturnreturns[, 1] + 1) - 1
+tangencycum <- cumprod(tangencyreturns[, 1] + 1) - 1
+
+
+#Backtesting low return low risk portfolio
+actualreturns <- as.matrix(actual)
+lowavg <- mean(minvarreturns)
+v1 <- c(lowavg)
+v2 <- c(lowavg)
+v3 <- c(lowavg)
+lowreturns <- rbind(as.matrix(minvarreturns), v1)
+lowreturns <- rbind(lowreturns, v2)
+lowreturns <- rbind(lowreturns, v3)
+rownames(lowreturns)[19:21] = c("2019-12-31", "2020-12-31", "2021-12-31")
+lowreturnscum <- cumprod(lowreturns + 1) - 1
+actuallowreturns <- as.timeSeries(actualreturns[,3:18] %*% minvarweights)
+actuallowreturnscum <- cumprod(actuallowreturns+1)-1
+ggplot(data = data.frame(actuallowreturnscum[1:21]), aes(x = as.Date(index(yearly[1:21,])) , y = actuallowreturnscum[1:21], color = "Actual")) +
+geom_line() +
+geom_line(aes(x = as.Date(index(yearly[1:21,])), y = lowreturnscum, color = "Predicted"))+
+labs(x = 'Date',
+       y = 'Cumulative Returns',
+       color = "Legend",
+       title = 'Low Risk Portfolio Cumulative Returns') +
+  theme(legend.key.size = unit(2, 'cm'))
+```
+
+## 5.2.2 Forward Predictions - Medium Risk Portfolio
+Forward predictions were made to examine the predicted performance of our Medium Risk Portfolio against its actual returns using historical data from *1 JAN 2019 to 18 MAR 2022.*
+```{r backtest_tangency, out.height="70%", fig.align='center'}
+#Backtesting medium return risk portfolio
+midavg <- mean(maxreturnreturns)
+v1 <- c(midavg)
+v2 <- c(midavg)
+v3 <- c(midavg)
+highreturns <- rbind(as.matrix(maxreturnreturns), v1)
+highreturns <- rbind(highreturns, v2)
+highreturns <- rbind(highreturns, v3)
+rownames(highreturns)[19:21] = c("2019-12-31", "2020-12-31", "2021-12-31")
+highreturnscum <- cumprod(highreturns + 1) - 1
+actualhighreturns <- as.timeSeries(actualreturns[,3:18] %*% maxreturnweights)
+actualhighreturnscum <- cumprod(actualhighreturns+1)-1
+ggplot(data = data.frame(actualhighreturnscum[1:21]), aes(x = as.Date(index(yearly[1:21,])), y = actualhighreturnscum[1:21], color = "Actual")) +
+geom_line() +
+geom_line(aes(x = as.Date(index(yearly[1:21,])), y = highreturnscum, color = "Predicted")) +
+labs(x = 'Date',
+       y = 'Cumulative Returns',
+       color = "Legend",
+       title = 'Medium Risk Portfolio Cumulative Returns')  +
+  theme(legend.key.size = unit(2, 'cm'))
+```
+
+## 5.2.3 Forward Predictions - High Risk Portfolio
+Forward predictions were made to examine the predicted performance of our High Risk Portfolio against its actual returns using historical data from *1 JAN 2019 to 18 MAR 2022.*
+``` {r backtest_GMVP, out.height="70%", fig.align='center'}
+
+#Backtesting High return risk portfolio
+highavg <- mean(tangencyreturns)
+v1 <- c(highavg)
+v2 <- c(highavg)
+v3 <- c(highavg)
+midreturns <- rbind(tangencyreturns, v1)
+midreturns <- rbind(midreturns, v2)
+midreturns <- rbind(midreturns, v3)
+rownames(midreturns)[19:21] = c("2019-12-31", "2020-12-31", "2021-12-31")
+midreturnscum <- cumprod(midreturns + 1) - 1
+actualmidreturns <- as.timeSeries(actualreturns[,3:18] %*% tangencyweights)
+actualmidreturnscum <- cumprod(actualmidreturns+1)-1
+ggplot(data = data.frame(actualmidreturnscum[1:21]), aes(x = as.Date(index(yearly[1:21,])), y = actualmidreturnscum[1:21], color = "Actual")) +
+geom_line() +
+geom_line(aes(x = as.Date(index(yearly[1:21,])), y = midreturnscum, color = "Predicted"))+
+labs(x = 'Date',
+       y = 'Cumulative Returns',
+       color = "Legend",
+       title = 'High Risk Portfolio Cumulative Returns') +
+  theme(legend.key.size = unit(2, 'cm'))
+
+
+```
+
+
+## 6 Summary - Performance of Portfolios
+
+``` {r cumulative_1y_5y_10y}
+
+filter1y = convertedReturnsMktTestAllTS %>% filter_by_time(.start_date = "2021-03")
+
+mkt1y = round(sum(filter1y$mkt) * 100,2)
+low1y = round(sum(filter1y$`Low Risk`) * 100,2)
+med1y = round(sum(filter1y$`Mid Risk`) * 100,2)
+high1y = round(sum(filter1y$`High Risk`) * 100,2)
+
+filter5y = convertedReturnsMktTestAllTS %>% filter_by_time(.start_date = "2017-03")
+mkt5y = round(sum(filter5y$mkt) * 100,2)
+low5y = round(sum(filter5y$`Low Risk`) * 100,2)
+med5y = round(sum(filter5y$`Mid Risk`) * 100,2)
+high5y = round(sum(filter5y$`High Risk`) * 100,2)
+
+filter10y = convertedReturnsMktTestAllTS %>% filter_by_time(.start_date = "2012-03")
+mkt10y = round(sum(filter10y$mkt) * 100,2)
+low10y = round(sum(filter10y$`Low Risk`) * 100,2)
+med10y = round(sum(filter10y$`Mid Risk`) * 100,2)
+high10y = round(sum(filter10y$`High Risk`) * 100,2)
+
+portfolios <- c("Market","Low Risk", "Mid Risk", "High Risk")
+comb1y <- c(mkt1y, low1y, med1y, high1y)
+comb5y <- c(mkt5y, low5y, med5y, high5y)
+comb10y <- c(mkt10y, low10y, med10y, high10y)
+cumreturns <- cbind(portfolios, comb1y, comb5y, comb10y)
+
+colnames(cumreturns) <- c("Portfolios", "Cumulative Returns - 1Y (%)", "Cumulative Returns - 5Y (%)", "Cumulative Returns - 10Y (%)")
+kable(cumreturns) %>% kableExtra::kable_styling(font_size = 6.5)
+```
+
+\small After comparing the performance of our 3 portfolios and the market portfolio with in-sample data from 1 Oct 2001 - 31 Dec 2018 and out-of-sample data from 1 Jan 2019 - 18 March 2022, we believe that the  **High Risk Portfolio** would be the **best** choice for risk-tolerant investors who are looking for a long term investment strategy as it yielded the highest cumulative returns over the 10 year investment horizon, beating the market portfolio. 
+
+Furthermore, **all portfolios have performed well** out-of-sample as seen in the previous section. The performance of all portfolios have been underestimated by our predicted daily returns as compared to their actual returns. Hence, our portfolios provide a robust estimate of returns, even in out-of-sample timeframes and have outperformed the market portfolio in the long run investment horizon.
+
+
+## Appendix 1 - CAPM/Excess Returns
+
+```{r linear regression, out.height="70%", fig.align='center'}
+intercepts = bind_rows(lm(`AGG` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`SCHP` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VCSH` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`BNDX` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VWOB` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`1306` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VOO` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VO` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VSS` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VGK` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VWO` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`1343` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VNQ` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`VNQI` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`IAU` ~ mkt, data = convertedReturnsMkt)$coefficients[1],
+lm(`BCI` ~ mkt, data = convertedReturnsMkt)$coefficients[1]
+)
+
+
+beta = bind_rows(lm(`AGG` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`SCHP` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VCSH` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`BNDX` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VWOB` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`1306` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VOO` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VO` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VSS` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VGK` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VWO` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`1343` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VNQ` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`VNQI` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`IAU` ~ mkt, data = convertedReturnsMkt)$coefficients[2],
+lm(`BCI` ~ mkt, data = convertedReturnsMkt)$coefficients[2]
+)
+
+linearRegression = cbind(intercepts,beta)
+rownames(linearRegression) = colnames(convertedReturnsMkt[c(-1,-2)])
+colnames(linearRegression) = c("Intercept", "Beta")
+
+marketRate <- mean(convertedReturnsMkt$mkt)
+
+excessReturn = rbind(mean(convertedReturnsMkt$`AGG`) - riskFreeRate + (linearRegression$Beta[1]*(marketRate - riskFreeRate)) ,
+mean(convertedReturnsMkt$`SCHP`) - riskFreeRate + linearRegression$Beta[2]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`VCSH`) - riskFreeRate + linearRegression$Beta[3]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`BNDX`) - riskFreeRate + linearRegression$Beta[4]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`VWOB`) - riskFreeRate + linearRegression$Beta[5]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`1306`) - riskFreeRate + linearRegression$Beta[6]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`VOO`) - riskFreeRate + linearRegression$Beta[7]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`VO`) - riskFreeRate + linearRegression$Beta[8]*(marketRate - riskFreeRate) ,
+mean(convertedReturnsMkt$`VSS`) - riskFreeRate + linearRegression$Beta[9]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`VGK`) - riskFreeRate + linearRegression$Beta[10]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`VWO`) - riskFreeRate + linearRegression$Beta[11]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`1343`) - riskFreeRate + linearRegression$Beta[12]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`VNQ`) - riskFreeRate + linearRegression$Beta[13]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`VNQ`) - riskFreeRate + linearRegression$Beta[14]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`IAU`) - riskFreeRate + linearRegression$Beta[15]*(marketRate - riskFreeRate),
+mean(convertedReturnsMkt$`BCI`) - riskFreeRate + linearRegression$Beta[16]*(marketRate - riskFreeRate)
+)
+
+linearRegression = cbind(intercepts,beta,excessReturn)
+rownames(linearRegression) = colnames(convertedReturnsMkt[c(-1,-2)])
+colnames(linearRegression) = c("Intercept", "Beta", "Excess Return")
+kable(linearRegression) %>% kableExtra::kable_styling(font_size = 10)
+  
+```
+
+## Appendix 2 - Covariance Matrix I
+
+```{r covariance matrix i}
+kable(round(cov(convertedReturns[-1]),10)[,1:8]) %>% kableExtra::kable_styling(font_size = 6)
+```
+
+## Appendix 2 - Covariance Matrix II
+
+```{r covariance matrix ii}
+kable(round(cov(convertedReturns[-1]),10)[,9:16]) %>% kableExtra::kable_styling(font_size = 6)
+```
